@@ -113,7 +113,7 @@ func main() {
 	})
 
 	p.RegisterEventHandler(func(events.AnnouncementWinPanelMatch) {
-		fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0)
+		fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0/60.0)
 		for _, pl := range p.GameState().Participants().All() {
 			ol := mapPlayerEx[pl.SteamID64]
 			if ol == nil {
