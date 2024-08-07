@@ -21,7 +21,6 @@ type MoveData struct {
 	IsWSOverlapping     bool
 	IsADOverlapping     bool
 	LastMoveAttemptTick int
-	IsAttemptingToMove  bool
 	NumMoveTicks        int
 	PerfectSwitchCount  int
 	OldButtons          uint64
