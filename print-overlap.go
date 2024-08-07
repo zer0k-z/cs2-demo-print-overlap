@@ -73,10 +73,10 @@ func main() {
 					// Pressing any key?
 					if val.S2UInt64()&0x618 != 0 && ol.OldButtons == 0 {
 						ol.LastMoveAttemptTick = p.GameState().IngameTick()
-						fmt.Printf("Player %s started moving @%d\n", ol.pl.Name, ol.LastMoveAttemptTick)
+						//fmt.Printf("Player %s started moving @%d\n", ol.pl.Name, ol.LastMoveAttemptTick)
 					} else if val.S2UInt64()&0x618 == 0 && ol.OldButtons != 0 {
 						ol.NumMoveTicks += p.GameState().IngameTick() - ol.LastMoveAttemptTick
-						fmt.Printf("Player %s stopped moving @%d (+%d)\n", ol.pl.Name, p.GameState().IngameTick(), p.GameState().IngameTick()-ol.LastMoveAttemptTick)
+						//fmt.Printf("Player %s stopped moving @%d (+%d)\n", ol.pl.Name, p.GameState().IngameTick(), p.GameState().IngameTick()-ol.LastMoveAttemptTick)
 					}
 
 					// Overlapping?
