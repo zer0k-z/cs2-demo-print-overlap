@@ -33,6 +33,7 @@ func checkPerfectSwitch(oldButtons uint64, newButtons uint64, key1 uint64, key2 
 
 // Run like this: go run print-overlap.go -demo /path/to/demo.dem
 func main() {
+	reported := false
 	mapPlayerEx := make(map[uint64]*MoveData)
 
 	f, err := os.Open(ex.DemoPathFromArgs())
@@ -51,7 +52,9 @@ func main() {
 		}
 
 		player := p.GameState().Participants().FindByHandle64(controllerProp.Handle())
-
+		if player == nil {
+			return nil
+		}
 		if mapPlayerEx[player.SteamID64] == nil {
 			mapPlayerEx[player.SteamID64] = &MoveData{pl: player, Tracking: true}
 		}
@@ -66,7 +69,7 @@ func main() {
 					// Let's just ignore these questions for now.
 					ol := getOverlapDataFromPawnEntity(pawnEntity)
 
-					if !ol.Tracking {
+					if ol == nil || !ol.Tracking {
 						return
 					}
 
@@ -111,8 +114,10 @@ func main() {
 			}
 		})
 	})
-
-	p.RegisterEventHandler(func(events.AnnouncementWinPanelMatch) {
+	spewReport := func() {
+		if reported {
+			return
+		}
 		fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0/60.0)
 		for _, pl := range p.GameState().Participants().All() {
 			ol := mapPlayerEx[pl.SteamID64]
@@ -137,13 +142,17 @@ func main() {
 			fmt.Printf("%s (%d): W/S overlap ticks %d, A/D overlap ticks %d, perfect switch count %d, total move ticks %d\n",
 				ol.pl.Name, ol.pl.SteamID64, ol.NumWSOverlapTick, ol.NumADOverlapTick, ol.PerfectSwitchCount, ol.NumMoveTicks)
 		}
+		reported = true
+	}
+	p.RegisterEventHandler(func(events.AnnouncementWinPanelMatch) {
+		spewReport()
 	})
 	fmt.Printf("Parsing overlap data for %s\n", f.Name())
 	fmt.Println("Keep in mind that this overlap data can be inaccurate and does not contain subtick information.")
 	fmt.Println("----")
 	// Parse to end
 	err = p.ParseToEnd()
-
+	spewReport()
 	checkError(err)
 }
 
