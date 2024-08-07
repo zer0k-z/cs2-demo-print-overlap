@@ -134,7 +134,7 @@ func main() {
 				ol.NumADOverlapTick += p.GameState().IngameTick() - ol.LastADOverlapTick
 			}
 
-			fmt.Printf("%s (%d): W/S overlap ticks %d , A/D overlap ticks %d, perfect switch count %d, total move ticks %d\n",
+			fmt.Printf("%s (%d): W/S overlap ticks %d, A/D overlap ticks %d, perfect switch count %d, total move ticks %d\n",
 				ol.pl.Name, ol.pl.SteamID64, ol.NumWSOverlapTick, ol.NumADOverlapTick, ol.PerfectSwitchCount, ol.NumMoveTicks)
 		}
 	})
