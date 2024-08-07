@@ -11,8 +11,9 @@ import (
 	st "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/sendtables"
 )
 
-type OverlapData struct {
+type MoveData struct {
 	pl                  *common.Player
+	Tracking            bool
 	LastWSOverlapTick   int
 	LastADOverlapTick   int
 	NumWSOverlapTick    int
@@ -22,11 +23,18 @@ type OverlapData struct {
 	LastMoveAttemptTick int
 	IsAttemptingToMove  bool
 	NumMoveTicks        int
+	PerfectSwitchCount  int
+	OldButtons          uint64
+}
+
+func checkPerfectSwitch(oldButtons uint64, newButtons uint64, key1 uint64, key2 uint64) bool {
+	// Previously pressing one key, currently pressing another.
+	return (oldButtons&key1 != 0 && oldButtons&key2 == 0 && newButtons&key2 != 0 && newButtons&key1 != 0) || (oldButtons&key2 != 0 && oldButtons&key1 == 0 && newButtons&key1 != 0 && newButtons&key2 != 0)
 }
 
 // Run like this: go run print-overlap.go -demo /path/to/demo.dem
 func main() {
-	mapPlayerEx := make(map[uint64]*OverlapData)
+	mapPlayerEx := make(map[uint64]*MoveData)
 
 	f, err := os.Open(ex.DemoPathFromArgs())
 	checkError(err)
@@ -37,7 +45,7 @@ func main() {
 	defer p.Close()
 
 	// Do not use this at the end of the game.
-	getOverlapDataFromPawnEntity := func(pawnEntity st.Entity) *OverlapData {
+	getOverlapDataFromPawnEntity := func(pawnEntity st.Entity) *MoveData {
 		controllerProp, hasProp := pawnEntity.PropertyValue("m_hController")
 		if !hasProp {
 			return nil
@@ -46,7 +54,7 @@ func main() {
 		player := p.GameState().Participants().FindByHandle64(controllerProp.Handle())
 
 		if mapPlayerEx[player.SteamID64] == nil {
-			mapPlayerEx[player.SteamID64] = &OverlapData{pl: player}
+			mapPlayerEx[player.SteamID64] = &MoveData{pl: player, Tracking: true}
 		}
 		return mapPlayerEx[player.SteamID64]
 	}
@@ -59,15 +67,17 @@ func main() {
 					// Let's just ignore these questions for now.
 					ol := getOverlapDataFromPawnEntity(pawnEntity)
 
+					if !ol.Tracking {
+						return
+					}
+
 					// Pressing any key?
-					if val.S2UInt64()&0x618 != 0 && !ol.IsAttemptingToMove {
+					if val.S2UInt64()&0x618 != 0 && ol.OldButtons == 0 {
 						ol.LastMoveAttemptTick = p.GameState().IngameTick()
-						ol.IsAttemptingToMove = true
-						//fmt.Printf("Player %s started moving @%d\n", ol.pl.Name, ol.LastMoveAttemptTick)
-					} else if ol.IsAttemptingToMove {
+						fmt.Printf("Player %s started moving @%d\n", ol.pl.Name, ol.LastMoveAttemptTick)
+					} else if val.S2UInt64()&0x618 == 0 && ol.OldButtons != 0 {
 						ol.NumMoveTicks += p.GameState().IngameTick() - ol.LastMoveAttemptTick
-						ol.IsAttemptingToMove = false
-						//fmt.Printf("Player %s stopped moving @%d (+%d)\n", ol.pl.Name, p.GameState().IngameTick(), p.GameState().IngameTick()-ol.LastMoveAttemptTick)
+						fmt.Printf("Player %s stopped moving @%d (+%d)\n", ol.pl.Name, p.GameState().IngameTick(), p.GameState().IngameTick()-ol.LastMoveAttemptTick)
 					}
 
 					// Overlapping?
@@ -92,6 +102,11 @@ func main() {
 						ol.IsADOverlapping = false
 						ol.NumADOverlapTick += p.GameState().IngameTick() - ol.LastADOverlapTick
 					}
+					if checkPerfectSwitch(ol.OldButtons, val.S2UInt64(), 0x8, 0x10) || checkPerfectSwitch(ol.OldButtons, val.S2UInt64(), 0x100, 0x200) {
+						ol.PerfectSwitchCount++
+					}
+					// Doesn't really need other buttons.
+					ol.OldButtons = val.S2UInt64() & 0x618
 				}
 				buttonProp.OnUpdate(buttonChanged)
 			}
@@ -106,11 +121,10 @@ func main() {
 				//fmt.Printf("Player %s is not valid\n", pl.Name)
 				continue
 			}
-
+			ol.Tracking = false
 			// Finalize the stats.
-			if ol.IsAttemptingToMove {
+			if ol.OldButtons != 0 {
 				ol.NumMoveTicks += p.GameState().IngameTick() - ol.LastMoveAttemptTick
-				ol.IsAttemptingToMove = false
 			}
 			if ol.IsWSOverlapping {
 				ol.IsWSOverlapping = false
@@ -121,8 +135,8 @@ func main() {
 				ol.NumADOverlapTick += p.GameState().IngameTick() - ol.LastADOverlapTick
 			}
 
-			fmt.Printf("%s (%d): %d ticks overlap W/S, %d ticks overlap A/D, total move ticks %d\n",
-				ol.pl.Name, ol.pl.SteamID64, ol.NumWSOverlapTick, ol.NumADOverlapTick, ol.NumMoveTicks)
+			fmt.Printf("%s (%d): %d ticks overlap W/S, %d ticks overlap A/D, perfect switch count %d, total move ticks %d\n",
+				ol.pl.Name, ol.pl.SteamID64, ol.NumWSOverlapTick, ol.NumADOverlapTick, ol.PerfectSwitchCount, ol.NumMoveTicks)
 		}
 	})
 	fmt.Printf("Parsing overlap data for %s\n", f.Name())
