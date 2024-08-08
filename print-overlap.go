@@ -9,32 +9,129 @@ import (
 	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
 	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
 	st "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/sendtables"
+	// stats "github.com/montanaflynn/stats"
 )
 
 type MoveData struct {
-	pl                  *common.Player
-	Tracking            bool
-	LastWSOverlapTick   int
-	LastADOverlapTick   int
-	NumWSOverlapTick    int
-	NumADOverlapTick    int
-	IsWSOverlapping     bool
-	IsADOverlapping     bool
-	LastMoveAttemptTick int
-	NumMoveTicks        int
-	PerfectSwitchCount  int
-	OldButtons          uint64
+	pl                    *common.Player
+	Tracking              bool
+	LastWSOverlapTick     int
+	LastADOverlapTick     int
+	WSOverlapTicks        []int
+	ADOverlapTicks        []int
+	IsWSOverlapping       bool
+	IsADOverlapping       bool
+	LastMoveAttemptTick   int
+	NumMoveTicks          int
+	GoodGroundSwitchCount int
+	OldButtons            uint64
+	OldYaw                float32
+	TurnState             int8
+	GoodTurns             uint32
+	AirTime               uint32
+	AirTurnData           []float64
 }
 
-func checkPerfectSwitch(oldButtons uint64, newButtons uint64, key1 uint64, key2 uint64) bool {
-	// Previously pressing one key, currently pressing another.
-	return (oldButtons&key1 != 0 && oldButtons&key2 == 0 && newButtons&key2 != 0 && newButtons&key1 != 0) || (oldButtons&key2 != 0 && oldButtons&key1 == 0 && newButtons&key1 != 0 && newButtons&key2 != 0)
+func (mv MoveData) GetWSTotalOverlap() int {
+	total := 0
+	for _, v := range mv.WSOverlapTicks {
+		total += v
+	}
+	return total
+}
+
+func (mv MoveData) GetADTotalOverlap() int {
+	total := 0
+	for _, v := range mv.ADOverlapTicks {
+		total += v
+	}
+	return total
+}
+
+func (mv MoveData) GetTurning() int8 {
+	curYaw := mv.pl.ViewDirectionY()
+	turning := curYaw != mv.OldYaw
+	if !turning {
+		return 0
+	}
+	if curYaw < mv.OldYaw-180 || (curYaw > mv.OldYaw && curYaw < mv.OldYaw+180) {
+		return -1
+	}
+	return 1
+}
+
+func (mv MoveData) checkGoodSwitch(newButtons uint64) bool {
+	IN_FORWARD := uint64(0x8)
+	IN_BACK := uint64(0x10)
+	IN_MOVELEFT := uint64(0x200)
+	IN_MOVERIGHT := uint64(0x400)
+	if mv.OldButtons&IN_FORWARD != 0 && // Used to press forward
+		newButtons&IN_FORWARD == 0 && // Not anymore
+		mv.OldButtons&IN_BACK == 0 && // Did not press backward
+		newButtons&IN_BACK != 0 { // Now do though
+		return true
+	}
+	if mv.OldButtons&IN_MOVELEFT != 0 &&
+		newButtons&IN_MOVELEFT == 0 &&
+		mv.OldButtons&IN_MOVERIGHT == 0 &&
+		newButtons&IN_MOVERIGHT != 0 {
+		return true
+	}
+	if mv.OldButtons&IN_BACK != 0 &&
+		newButtons&IN_BACK == 0 &&
+		mv.OldButtons&IN_FORWARD == 0 &&
+		newButtons&IN_FORWARD != 0 {
+		return true
+	}
+	if mv.OldButtons&IN_MOVERIGHT != 0 &&
+		newButtons&IN_MOVERIGHT == 0 &&
+		mv.OldButtons&IN_MOVELEFT == 0 &&
+		newButtons&IN_MOVELEFT != 0 {
+		return true
+	}
+	return false
+}
+
+func getButtonText(buttons uint64) string {
+	IN_FORWARD := uint64(0x8)
+	IN_BACK := uint64(0x10)
+	IN_MOVELEFT := uint64(0x200)
+	IN_MOVERIGHT := uint64(0x400)
+	output := ""
+
+	if buttons&IN_FORWARD != 0 {
+		output += "W "
+	} else {
+		output += "_ "
+	}
+	if buttons&IN_MOVELEFT != 0 {
+		output += "A "
+	} else {
+		output += "_ "
+	}
+	if buttons&IN_BACK != 0 {
+		output += "S "
+	} else {
+		output += "_ "
+	}
+	if buttons&IN_MOVERIGHT != 0 {
+		output += "D "
+	} else {
+		output += "_ "
+	}
+	return output
 }
 
 // Run like this: go run print-overlap.go -demo /path/to/demo.dem
 func main() {
 	reported := false
 	mapPlayerEx := make(map[uint64]*MoveData)
+
+	output, err := os.Create("output.csv")
+	if err != nil {
+		return
+	}
+	defer output.Close()
 
 	f, err := os.Open(ex.DemoPathFromArgs())
 	checkError(err)
@@ -60,6 +157,46 @@ func main() {
 		}
 		return mapPlayerEx[player.SteamID64]
 	}
+	p.RegisterEventHandler(func(events.FrameDone) {
+		for _, pl := range p.GameState().Participants().All() {
+			mv := mapPlayerEx[pl.SteamID64]
+			if mv == nil {
+				//fmt.Printf("Player %s is not valid\n", pl.Name)
+				continue
+			}
+			if !mv.Tracking {
+				continue
+			}
+			pawnEntity := mv.pl.PlayerPawnEntity()
+			if pawnEntity == nil {
+				continue
+			}
+			prop, _ := pawnEntity.PropertyValue("m_hGroundEntity")
+			groundEnt := p.GameState().EntityByHandle(prop.Handle())
+			if groundEnt == nil {
+				mv.AirTime++
+				if mv.GetTurning() > 0 {
+					diff := mv.OldYaw - mv.pl.ViewDirectionY()
+					if diff < 0 {
+						diff += 360
+					}
+					mv.AirTurnData = append(mv.AirTurnData, float64(diff))
+				} else if mv.GetTurning() < 0 {
+					diff := mv.pl.ViewDirectionY() - mv.OldYaw
+					if diff < 0 {
+						diff += 360
+					}
+					mv.AirTurnData = append(mv.AirTurnData, float64(diff))
+				}
+
+				if mv.TurnState+mv.GetTurning() == 0 && mv.TurnState != 0 {
+					mv.GoodTurns++
+				}
+			}
+			mv.TurnState = mv.GetTurning()
+			mv.OldYaw = mv.pl.ViewDirectionY()
+		}
+	})
 	p.RegisterEventHandler(func(events.DataTablesParsed) {
 		p.ServerClasses().FindByName("CCSPlayerPawn").OnEntityCreated(func(pawnEntity st.Entity) {
 			buttonProp := pawnEntity.Property("m_pMovementServices.m_nButtonDownMaskPrev")
@@ -67,48 +204,57 @@ func main() {
 				buttonChanged := func(val st.PropertyValue) {
 					// Can dead players press buttons? What about freeze time?
 					// Let's just ignore these questions for now.
-					ol := getOverlapDataFromPawnEntity(pawnEntity)
+					mv := getOverlapDataFromPawnEntity(pawnEntity)
 
-					if ol == nil || !ol.Tracking {
+					if mv == nil || !mv.Tracking {
 						return
 					}
-
 					// Pressing any key?
-					if val.S2UInt64()&0x618 != 0 && ol.OldButtons == 0 {
-						ol.LastMoveAttemptTick = p.GameState().IngameTick()
+					if val.S2UInt64()&0x618 != 0 && mv.OldButtons == 0 {
+						mv.LastMoveAttemptTick = p.GameState().IngameTick()
 						//fmt.Printf("Player %s started moving @%d\n", ol.pl.Name, ol.LastMoveAttemptTick)
-					} else if val.S2UInt64()&0x618 == 0 && ol.OldButtons != 0 {
-						ol.NumMoveTicks += p.GameState().IngameTick() - ol.LastMoveAttemptTick
+					} else if val.S2UInt64()&0x618 == 0 && mv.OldButtons != 0 {
+						mv.NumMoveTicks += p.GameState().IngameTick() - mv.LastMoveAttemptTick
 						//fmt.Printf("Player %s stopped moving @%d (+%d)\n", ol.pl.Name, p.GameState().IngameTick(), p.GameState().IngameTick()-ol.LastMoveAttemptTick)
 					}
 
 					// Overlapping?
 					if (val.S2UInt64()&0x10 != 0) && (val.S2UInt64()&0x8 != 0) {
-						ol.IsWSOverlapping = true
-						ol.LastWSOverlapTick = p.GameState().IngameTick()
+						mv.IsWSOverlapping = true
+						mv.LastWSOverlapTick = p.GameState().IngameTick()
 						// fmt.Printf("%s W/S overlapped at tick %d\n",
 						// 	ol.pl.Name,
 						// 	p.GameState().IngameTick())
-					} else if ol.IsWSOverlapping {
-						ol.IsWSOverlapping = false
-						ol.NumWSOverlapTick += p.GameState().IngameTick() - ol.LastWSOverlapTick
+					} else if mv.IsWSOverlapping {
+						mv.IsWSOverlapping = false
+						numOverlapTick := p.GameState().IngameTick() - mv.LastWSOverlapTick
+						if numOverlapTick > 1 {
+							mv.WSOverlapTicks = append(mv.WSOverlapTicks, numOverlapTick)
+						} else {
+							mv.GoodGroundSwitchCount++
+						}
 					}
 
 					if (val.S2UInt64()&0x200 != 0) && (val.S2UInt64()&0x400 != 0) {
-						ol.IsADOverlapping = true
-						ol.LastADOverlapTick = p.GameState().IngameTick()
+						mv.IsADOverlapping = true
+						mv.LastADOverlapTick = p.GameState().IngameTick()
 						// fmt.Printf("%s A/D overlapped at tick %d\n",
 						// 	ol.pl.Name,
 						// 	p.GameState().IngameTick())
-					} else if ol.IsADOverlapping {
-						ol.IsADOverlapping = false
-						ol.NumADOverlapTick += p.GameState().IngameTick() - ol.LastADOverlapTick
+					} else if mv.IsADOverlapping {
+						mv.IsADOverlapping = false
+						numOverlapTick := p.GameState().IngameTick() - mv.LastADOverlapTick
+						if numOverlapTick > 1 {
+							mv.ADOverlapTicks = append(mv.ADOverlapTicks, numOverlapTick)
+						} else {
+							mv.GoodGroundSwitchCount++
+						}
 					}
-					if checkPerfectSwitch(ol.OldButtons, val.S2UInt64(), 0x8, 0x10) || checkPerfectSwitch(ol.OldButtons, val.S2UInt64(), 0x100, 0x200) {
-						ol.PerfectSwitchCount++
+					if mv.checkGoodSwitch(val.S2UInt64()) {
+						mv.GoodGroundSwitchCount++
 					}
 					// Doesn't really need other buttons.
-					ol.OldButtons = val.S2UInt64() & 0x618
+					mv.OldButtons = val.S2UInt64() & 0x618
 				}
 				buttonProp.OnUpdate(buttonChanged)
 			}
@@ -119,28 +265,73 @@ func main() {
 			return
 		}
 		fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0/60.0)
+		output.WriteString("SteamID64,Name,A/D overlap (instances),A/D overlap (ticks),A/D overlap (tick/instance),W/S overlap (instances),W/S overlap (ticks),W/S overlap (tick/instance),Good Strafe Switch,Total Move Ticks,Good Airstrafe Turns,Total Airtime\n")
 		for _, pl := range p.GameState().Participants().All() {
-			ol := mapPlayerEx[pl.SteamID64]
-			if ol == nil {
+			mv := mapPlayerEx[pl.SteamID64]
+			if mv == nil {
 				//fmt.Printf("Player %s is not valid\n", pl.Name)
 				continue
 			}
-			ol.Tracking = false
+			mv.Tracking = false
 			// Finalize the stats.
-			if ol.OldButtons != 0 {
-				ol.NumMoveTicks += p.GameState().IngameTick() - ol.LastMoveAttemptTick
+			if mv.OldButtons != 0 {
+				mv.NumMoveTicks += p.GameState().IngameTick() - mv.LastMoveAttemptTick
 			}
-			if ol.IsWSOverlapping {
-				ol.IsWSOverlapping = false
-				ol.NumWSOverlapTick += p.GameState().IngameTick() - ol.LastWSOverlapTick
+			if mv.IsWSOverlapping {
+				mv.IsWSOverlapping = false
+				numOverlapTick := p.GameState().IngameTick() - mv.LastWSOverlapTick
+				if numOverlapTick > 1 {
+					mv.WSOverlapTicks = append(mv.WSOverlapTicks, numOverlapTick)
+				} else {
+					mv.GoodGroundSwitchCount++
+				}
 			}
-			if ol.IsADOverlapping {
-				ol.IsADOverlapping = false
-				ol.NumADOverlapTick += p.GameState().IngameTick() - ol.LastADOverlapTick
+			if mv.IsADOverlapping {
+				mv.IsADOverlapping = false
+				numOverlapTick := p.GameState().IngameTick() - mv.LastADOverlapTick
+				if numOverlapTick > 1 {
+					mv.ADOverlapTicks = append(mv.ADOverlapTicks, numOverlapTick)
+				} else {
+					mv.GoodGroundSwitchCount++
+				}
 			}
 
-			fmt.Printf("%s (%d): W/S overlap ticks %d, A/D overlap ticks %d, perfect switch count %d, total move ticks %d\n",
-				ol.pl.Name, ol.pl.SteamID64, ol.NumWSOverlapTick, ol.NumADOverlapTick, ol.PerfectSwitchCount, ol.NumMoveTicks)
+			fmt.Printf("%s (%d): W/S overlap ticks %d, A/D overlap ticks %d, good key switch count %d, total move ticks %d, good turns %d, airtime %d",
+				mv.pl.Name, mv.pl.SteamID64, mv.GetWSTotalOverlap(), mv.GetADTotalOverlap(), mv.GoodGroundSwitchCount, mv.NumMoveTicks, mv.GoodTurns, mv.AirTime)
+			// Airstrafe speed stuff
+			// mean, _ := stats.Mean(ol.AirTurnData)
+			// fmt.Printf(", average turn speed %f (%d samples total)\n", mean, len(ol.AirTurnData))
+			// for i := 10; i < 100; i += 20 {
+			// 	percentile, _ := stats.Percentile(ol.AirTurnData, float64(i))
+			// 	fmt.Printf("%d%%: %f\n", i, percentile)
+			// }
+
+			fmt.Println("")
+
+			WSavg := float32(0)
+			if len(mv.WSOverlapTicks) > 0 {
+				WSavg = float32(mv.GetWSTotalOverlap()) / float32(len(mv.WSOverlapTicks))
+			}
+
+			ADavg := float32(0)
+			if len(mv.ADOverlapTicks) > 0 {
+				ADavg = float32(mv.GetADTotalOverlap()) / float32(len(mv.ADOverlapTicks))
+			}
+
+			line := fmt.Sprintf("%d,%s,%d,%d,%f,%d,%d,%f,%d,%d,%d,%d\n",
+				mv.pl.SteamID64,
+				mv.pl.Name,
+				len(mv.ADOverlapTicks),
+				mv.GetADTotalOverlap(),
+				ADavg,
+				len(mv.WSOverlapTicks),
+				mv.GetWSTotalOverlap(),
+				WSavg,
+				mv.GoodGroundSwitchCount,
+				mv.NumMoveTicks,
+				mv.GoodTurns,
+				mv.AirTime)
+			output.WriteString(line)
 		}
 		reported = true
 	}
@@ -154,6 +345,8 @@ func main() {
 	err = p.ParseToEnd()
 	spewReport()
 	checkError(err)
+
+	fmt.Println("Parsing done. Details are saved in output.csv")
 }
 
 func checkError(err error) {

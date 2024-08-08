@@ -2,7 +2,10 @@ module github.com/zer0k-z/cs2-print-overlap
 
 go 1.22.4
 
-require github.com/markus-wa/demoinfocs-golang/v4 v4.2.5
+require (
+	github.com/markus-wa/demoinfocs-golang/v4 v4.2.5
+	github.com/montanaflynn/stats v0.7.1
+)
 
 require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217 // indirect
