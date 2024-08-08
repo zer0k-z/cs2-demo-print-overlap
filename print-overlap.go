@@ -1,10 +1,12 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
-	ex "github.com/markus-wa/demoinfocs-golang/v4/examples"
 	demoinfocs "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
 	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
 	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
@@ -31,6 +33,13 @@ type MoveData struct {
 	AirTime               uint32
 	AirTurnData           []float64
 }
+
+const (
+	IN_FORWARD   = uint64(0x8)
+	IN_BACK      = uint64(0x10)
+	IN_MOVELEFT  = uint64(0x200)
+	IN_MOVERIGHT = uint64(0x400)
+)
 
 func (mv MoveData) GetWSTotalOverlap() int {
 	total := 0
@@ -61,10 +70,6 @@ func (mv MoveData) GetTurning() int8 {
 }
 
 func (mv MoveData) checkGoodSwitch(newButtons uint64) bool {
-	IN_FORWARD := uint64(0x8)
-	IN_BACK := uint64(0x10)
-	IN_MOVELEFT := uint64(0x200)
-	IN_MOVERIGHT := uint64(0x400)
 	if mv.OldButtons&IN_FORWARD != 0 && // Used to press forward
 		newButtons&IN_FORWARD == 0 && // Not anymore
 		mv.OldButtons&IN_BACK == 0 && // Did not press backward
@@ -92,48 +97,69 @@ func (mv MoveData) checkGoodSwitch(newButtons uint64) bool {
 	return false
 }
 
-func getButtonText(buttons uint64) string {
-	IN_FORWARD := uint64(0x8)
-	IN_BACK := uint64(0x10)
-	IN_MOVELEFT := uint64(0x200)
-	IN_MOVERIGHT := uint64(0x400)
-	output := ""
+// Run like this: go run print-overlap.go -demo="/path/to/demo.dem"
+// Run like this: go run print-overlap.go -dir="/path/to/"
 
-	if buttons&IN_FORWARD != 0 {
-		output += "W "
-	} else {
-		output += "_ "
-	}
-	if buttons&IN_MOVELEFT != 0 {
-		output += "A "
-	} else {
-		output += "_ "
-	}
-	if buttons&IN_BACK != 0 {
-		output += "S "
-	} else {
-		output += "_ "
-	}
-	if buttons&IN_MOVERIGHT != 0 {
-		output += "D "
-	} else {
-		output += "_ "
-	}
-	return output
-}
-
-// Run like this: go run print-overlap.go -demo /path/to/demo.dem
 func main() {
-	reported := false
-	mapPlayerEx := make(map[uint64]*MoveData)
+	dir := flag.String("dir", "", "Directory to process")
 
-	output, err := os.Create("output.csv")
-	if err != nil {
+	demo := flag.String("demo", "", "Demo file `path`")
+
+	verbose := flag.Bool("v", false, "Enable verbose stdout")
+	// Parse the flags
+	flag.Parse()
+
+	if (*dir == "" && *demo == "") || (*dir != "" && *demo != "") {
+		fmt.Println("Error: -dir OR -demo flag is required")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	fmt.Println("Movement Input Parser by zer0.k")
+	fmt.Println("Keep in mind that this overlap data can be inaccurate and does not contain subtick information.")
+	fmt.Println("----")
+
+	if *demo != "" {
+		parseDemo(*demo, *verbose)
 		return
 	}
+	fmt.Println("Parsing dir", *dir)
+	err := filepath.Walk(*dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if !info.IsDir() && filepath.Ext(info.Name()) == ".dem" {
+			fmt.Println("Parsing demo file:", path)
+			parseDemo(path, *verbose)
+		}
+
+		return nil
+	})
+
+	checkError(err)
+
+	fmt.Println("Parsing done.")
+}
+
+func parseDemo(path string, verbose bool) {
+	reported := false
+	mapPlayerEx := make(map[uint64]*MoveData)
+	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".csv"
+
+	defer func() {
+		if err := recover(); err != nil {
+			fmt.Println("panic occurred:", err)
+			os.Remove(outputPath)
+		}
+	}()
+
+	output, err := os.Create(outputPath)
+	checkError(err)
+
 	defer output.Close()
 
-	f, err := os.Open(ex.DemoPathFromArgs())
+	f, err := os.Open(path)
 	checkError(err)
 
 	defer f.Close()
@@ -264,7 +290,9 @@ func main() {
 		if reported {
 			return
 		}
-		fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0/60.0)
+		if verbose {
+			fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0/60.0)
+		}
 		output.WriteString("SteamID64,Name,A/D overlap (instances),A/D overlap (ticks),A/D overlap (tick/instance),W/S overlap (instances),W/S overlap (ticks),W/S overlap (tick/instance),Good Strafe Switch,Total Move Ticks,Good Airstrafe Turns,Total Airtime\n")
 		for _, pl := range p.GameState().Participants().All() {
 			mv := mapPlayerEx[pl.SteamID64]
@@ -296,8 +324,11 @@ func main() {
 				}
 			}
 
-			fmt.Printf("%s (%d): W/S overlap ticks %d, A/D overlap ticks %d, good key switch count %d, total move ticks %d, good turns %d, airtime %d",
-				mv.pl.Name, mv.pl.SteamID64, mv.GetWSTotalOverlap(), mv.GetADTotalOverlap(), mv.GoodGroundSwitchCount, mv.NumMoveTicks, mv.GoodTurns, mv.AirTime)
+			if verbose {
+				fmt.Printf("%s (%d): W/S overlap ticks %d, A/D overlap ticks %d, good key switch count %d, total move ticks %d, good turns %d, airtime %d",
+					mv.pl.Name, mv.pl.SteamID64, mv.GetWSTotalOverlap(), mv.GetADTotalOverlap(), mv.GoodGroundSwitchCount, mv.NumMoveTicks, mv.GoodTurns, mv.AirTime)
+				fmt.Println("")
+			}
 			// Airstrafe speed stuff
 			// mean, _ := stats.Mean(ol.AirTurnData)
 			// fmt.Printf(", average turn speed %f (%d samples total)\n", mean, len(ol.AirTurnData))
@@ -305,8 +336,6 @@ func main() {
 			// 	percentile, _ := stats.Percentile(ol.AirTurnData, float64(i))
 			// 	fmt.Printf("%d%%: %f\n", i, percentile)
 			// }
-
-			fmt.Println("")
 
 			WSavg := float32(0)
 			if len(mv.WSOverlapTicks) > 0 {
@@ -338,17 +367,12 @@ func main() {
 	p.RegisterEventHandler(func(events.AnnouncementWinPanelMatch) {
 		spewReport()
 	})
-	fmt.Printf("Parsing overlap data for %s\n", f.Name())
-	fmt.Println("Keep in mind that this overlap data can be inaccurate and does not contain subtick information.")
-	fmt.Println("----")
 	// Parse to end
 	err = p.ParseToEnd()
 	spewReport()
 	checkError(err)
 
-	fmt.Println("Parsing done. Details are saved in output.csv")
 }
-
 func checkError(err error) {
 	if err != nil {
 		panic(err)
