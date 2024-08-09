@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	demoinfocs "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
 	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
@@ -99,8 +101,20 @@ func (mv MoveData) checkGoodSwitch(newButtons uint64) bool {
 
 // Run like this: go run print-overlap.go -demo="/path/to/demo.dem"
 // Run like this: go run print-overlap.go -dir="/path/to/"
+type Result struct {
+	Path  string
+	Error error
+}
 
 func main() {
+	result := make(chan Result)
+
+	// WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+
+	// Slice to store all failed results
+	var failedResults []Result
+
 	dir := flag.String("dir", "", "Directory to process")
 
 	demo := flag.String("demo", "", "Demo file `path`")
@@ -120,37 +134,65 @@ func main() {
 	fmt.Println("----")
 
 	if *demo != "" {
-		parseDemo(*demo, *verbose)
-		return
+		go parseDemo(*demo, *verbose, result)
+
+	} else {
+		fmt.Println("Parsing dir", *dir)
+
+		err := filepath.Walk(*dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if !info.IsDir() && filepath.Ext(info.Name()) == ".dem" {
+				fmt.Println("Parsing demo file:", path)
+				wg.Add(1)
+				go func(path string, verbose bool) {
+					defer wg.Done()
+					parseDemo(path, verbose, result)
+				}(path, *verbose)
+			}
+
+			return nil
+		})
+		checkError(err)
 	}
-	fmt.Println("Parsing dir", *dir)
-	err := filepath.Walk(*dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+
+	go func() {
+		wg.Wait()
+		close(result)
+	}()
+
+	// Collect all results from the result channel
+	for res := range result {
+		if res.Error != nil {
+			// Store the failed result
+			failedResults = append(failedResults, res)
 		}
+	}
 
-		if !info.IsDir() && filepath.Ext(info.Name()) == ".dem" {
-			fmt.Println("Parsing demo file:", path)
-			parseDemo(path, *verbose)
-		}
-
-		return nil
-	})
-
-	checkError(err)
+	// Process and print all failed results
+	for _, res := range failedResults {
+		fmt.Printf("Failed goroutines: Path=%s, Error: %v\n", res.Path, res.Error)
+	}
 
 	fmt.Println("Parsing done.")
 }
 
-func parseDemo(path string, verbose bool) {
+func parseDemo(path string, verbose bool, result chan<- Result) {
+
 	reported := false
 	mapPlayerEx := make(map[uint64]*MoveData)
 	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".csv"
 
+	var res Result
+	res.Path = path
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Println("panic occurred:", err)
+			fmt.Printf("panic occurred for path %s: %s\n", path, err)
 			os.Remove(outputPath)
+			res.Error = fmt.Errorf("panic occurred: %v", err)
+			result <- res
 		}
 	}()
 
@@ -164,6 +206,9 @@ func parseDemo(path string, verbose bool) {
 
 	defer f.Close()
 
+	stat, err := f.Stat()
+	checkError(err)
+
 	p := demoinfocs.NewParser(f)
 	defer p.Close()
 
@@ -176,6 +221,9 @@ func parseDemo(path string, verbose bool) {
 
 		player := p.GameState().Participants().FindByHandle64(controllerProp.Handle())
 		if player == nil {
+			return nil
+		}
+		if player.SteamID64 == 0 {
 			return nil
 		}
 		if mapPlayerEx[player.SteamID64] == nil {
@@ -194,7 +242,7 @@ func parseDemo(path string, verbose bool) {
 				continue
 			}
 			pawnEntity := mv.pl.PlayerPawnEntity()
-			if pawnEntity == nil {
+			if pawnEntity == nil || pawnEntity.ServerClass().Name() != "CCSPlayerPawn" {
 				continue
 			}
 			prop, _ := pawnEntity.PropertyValue("m_hGroundEntity")
@@ -293,7 +341,7 @@ func parseDemo(path string, verbose bool) {
 		if verbose {
 			fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0/60.0)
 		}
-		output.WriteString("SteamID64,Name,A/D overlap (instances),A/D overlap (ticks),A/D overlap (tick/instance),W/S overlap (instances),W/S overlap (ticks),W/S overlap (tick/instance),Good Strafe Switch,Total Move Ticks,Good Airstrafe Turns,Total Airtime\n")
+		output.WriteString("Date,SteamID64,Name,A/D overlap (instances),A/D overlap (ticks),A/D overlap (tick/instance),W/S overlap (instances),W/S overlap (ticks),W/S overlap (tick/instance),Good Strafe Switch,Total Move Ticks,Good Airstrafe Turns,Total Airtime\n")
 		for _, pl := range p.GameState().Participants().All() {
 			mv := mapPlayerEx[pl.SteamID64]
 			if mv == nil {
@@ -347,7 +395,8 @@ func parseDemo(path string, verbose bool) {
 				ADavg = float32(mv.GetADTotalOverlap()) / float32(len(mv.ADOverlapTicks))
 			}
 
-			line := fmt.Sprintf("%d,%s,%d,%d,%f,%d,%d,%f,%d,%d,%d,%d\n",
+			line := fmt.Sprintf("%s,%d,%s,%d,%d,%f,%d,%d,%f,%d,%d,%d,%d\n",
+				stat.ModTime().Format(time.DateTime),
 				mv.pl.SteamID64,
 				mv.pl.Name,
 				len(mv.ADOverlapTicks),
