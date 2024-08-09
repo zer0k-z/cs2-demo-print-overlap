@@ -6,4 +6,4 @@ Optional arguments:
 
 - `-dir <directory>` for directory parsing
 - `-v` for verbose output to console
-- `max-concurrent` to limit the number of concurrent parsing (default 8)
+- `max-concurrent <#>` to limit the number of concurrent parsing (default 8)
