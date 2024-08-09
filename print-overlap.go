@@ -118,14 +118,14 @@ func main() {
 
 	result := make(chan Result)
 
-	// WaitGroup to wait for all goroutines to finish
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, *max)
-
 	// Slice to store all failed results
 	var failedResults []Result
 	// Parse the flags
 	flag.Parse()
+
+	// WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, *max)
 
 	if (*dir == "" && *demo == "") || (*dir != "" && *demo != "") {
 		fmt.Println("Error: -dir OR -demo flag is required")
@@ -136,6 +136,15 @@ func main() {
 	fmt.Println("Movement Input Parser by zer0.k")
 	fmt.Println("Keep in mind that this overlap data can be inaccurate and does not contain subtick information.")
 	fmt.Println("----")
+
+	go func() {
+		for res := range result {
+			if res.Error != nil {
+				// Store the failed result
+				failedResults = append(failedResults, res)
+			}
+		}
+	}()
 
 	if *demo != "" {
 		go parseDemo(*demo, *verbose, result)
@@ -168,14 +177,6 @@ func main() {
 		wg.Wait()
 		close(result)
 	}()
-
-	// Collect all results from the result channel
-	for res := range result {
-		if res.Error != nil {
-			// Store the failed result
-			failedResults = append(failedResults, res)
-		}
-	}
 
 	// Process and print all failed results
 	for _, res := range failedResults {
