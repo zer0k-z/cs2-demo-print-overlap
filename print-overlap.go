@@ -107,19 +107,23 @@ type Result struct {
 }
 
 func main() {
-	result := make(chan Result)
-
-	// WaitGroup to wait for all goroutines to finish
-	var wg sync.WaitGroup
-
-	// Slice to store all failed results
-	var failedResults []Result
 
 	dir := flag.String("dir", "", "Directory to process")
 
 	demo := flag.String("demo", "", "Demo file `path`")
 
 	verbose := flag.Bool("v", false, "Enable verbose stdout")
+
+	max := flag.Int("max-concurrent", 8, "Maximum amount of demos parsed at the same time")
+
+	result := make(chan Result)
+
+	// WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, *max)
+
+	// Slice to store all failed results
+	var failedResults []Result
 	// Parse the flags
 	flag.Parse()
 
@@ -147,8 +151,10 @@ func main() {
 			if !info.IsDir() && filepath.Ext(info.Name()) == ".dem" {
 				fmt.Println("Parsing demo file:", path)
 				wg.Add(1)
+				semaphore <- struct{}{} // Acquire semaphore
 				go func(path string, verbose bool) {
 					defer wg.Done()
+					defer func() { <-semaphore }() // Release the semaphore
 					parseDemo(path, verbose, result)
 				}(path, *verbose)
 			}
