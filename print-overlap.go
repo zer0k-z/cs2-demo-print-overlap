@@ -166,8 +166,10 @@ func main() {
 		checkError(err)
 	}
 
-	wg.Wait()
-	close(result)
+	go func() {
+		wg.Wait()
+		close(result)
+	}()
 
 	for res := range result {
 		if res.Error != nil {
@@ -179,8 +181,6 @@ func main() {
 }
 
 func parseDemo(path string, verbose bool, result chan<- Result) {
-	fmt.Println("Parsing demo file:", path)
-
 	reported := false
 	mapPlayerEx := make(map[uint64]*MoveData)
 	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".csv"
