@@ -13,7 +13,6 @@ import (
 	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
 	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
 	st "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/sendtables"
-	// stats "github.com/montanaflynn/stats"
 )
 
 type MoveData struct {
@@ -118,8 +117,6 @@ func main() {
 
 	result := make(chan Result)
 
-	// Slice to store all failed results
-	var failedResults []Result
 	// Parse the flags
 	flag.Parse()
 
@@ -137,17 +134,13 @@ func main() {
 	fmt.Println("Keep in mind that this overlap data can be inaccurate and does not contain subtick information.")
 	fmt.Println("----")
 
-	go func() {
-		for res := range result {
-			if res.Error != nil {
-				// Store the failed result
-				failedResults = append(failedResults, res)
-			}
-		}
-	}()
-
 	if *demo != "" {
-		go parseDemo(*demo, *verbose, result)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			parseDemo(*demo, *verbose, result)
+		}()
 
 	} else {
 		fmt.Println("Parsing dir", *dir)
@@ -178,16 +171,16 @@ func main() {
 		close(result)
 	}()
 
-	// Process and print all failed results
-	for _, res := range failedResults {
-		fmt.Printf("Failed goroutines: Path=%s, Error: %v\n", res.Path, res.Error)
+	for res := range result {
+		if res.Error != nil {
+			fmt.Printf("Failed goroutines: Path=%s, Error: %v\n", res.Path, res.Error)
+		}
 	}
 
 	fmt.Println("Parsing done.")
 }
 
 func parseDemo(path string, verbose bool, result chan<- Result) {
-
 	reported := false
 	mapPlayerEx := make(map[uint64]*MoveData)
 	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".csv"
@@ -429,6 +422,7 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 	checkError(err)
 
 }
+
 func checkError(err error) {
 	if err != nil {
 		panic(err)
