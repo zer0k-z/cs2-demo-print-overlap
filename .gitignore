@@ -1,2 +1,5 @@
 *.csv
 *.dem
+output.csv
+.vscode
+demos/*

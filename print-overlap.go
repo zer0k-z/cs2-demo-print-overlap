@@ -5,34 +5,41 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	demoinfocs "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs"
-	common "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/common"
-	events "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/events"
-	st "github.com/markus-wa/demoinfocs-golang/v4/pkg/demoinfocs/sendtables"
+	demoinfocs "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs"
+	common "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/common"
+	events "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/events"
+	st "github.com/markus-wa/demoinfocs-golang/v5/pkg/demoinfocs/sendtables"
 )
 
 type MoveData struct {
-	pl                    *common.Player
-	Tracking              bool
-	LastWSOverlapTick     int
-	LastADOverlapTick     int
-	WSOverlapTicks        []int
-	ADOverlapTicks        []int
-	IsWSOverlapping       bool
-	IsADOverlapping       bool
-	LastMoveAttemptTick   int
-	NumMoveTicks          int
-	GoodGroundSwitchCount int
-	OldButtons            uint64
-	OldYaw                float32
-	TurnState             int8
-	GoodTurns             uint32
-	AirTime               uint32
-	AirTurnData           []float64
+	pl                          *common.Player
+	Tracking                    bool
+	DebugKeepAllSubtickEvents   bool
+	HasSubtickData              bool
+	SubtickDecodeErrors         int
+	SubtickButtons              uint64
+	RecentForwardBackwardEvents []InputEvent
+	RecentLeftRightEvents       []InputEvent
+	LastWSOverlapTick           int
+	LastADOverlapTick           int
+	WSOverlapTicks              []int
+	ADOverlapTicks              []int
+	IsWSOverlapping             bool
+	IsADOverlapping             bool
+	LastMoveAttemptTick         int
+	NumMoveTicks                int
+	GoodGroundSwitchCount       int
+	OldButtons                  uint64
+	OldYaw                      float32
+	TurnState                   int8
+	GoodTurns                   uint32
+	AirTime                     uint32
+	AirTurnData                 []float64
 }
 
 const (
@@ -112,6 +119,7 @@ func main() {
 	demo := flag.String("demo", "", "Demo file `path`")
 
 	verbose := flag.Bool("v", false, "Enable verbose stdout")
+	debugPlayer := flag.String("debug-player", "", "Player name or SteamID64 to dump subtick left/right events for")
 
 	max := flag.Int("max-concurrent", 8, "Maximum amount of demos parsed at the same time")
 
@@ -121,7 +129,7 @@ func main() {
 	flag.Parse()
 
 	// WaitGroup to wait for all goroutines to finish
-	var wg sync.WaitGroup
+	wg := &sync.WaitGroup{}
 	semaphore := make(chan struct{}, *max)
 
 	if (*dir == "" && *demo == "") || (*dir != "" && *demo != "") {
@@ -131,7 +139,7 @@ func main() {
 	}
 
 	fmt.Println("Movement Input Parser by zer0.k")
-	fmt.Println("Keep in mind that this overlap data can be inaccurate and does not contain subtick information.")
+	fmt.Println("Subtick null-detection uses decoded usercmd subtick move data when available.")
 	fmt.Println("----")
 
 	if *demo != "" {
@@ -139,7 +147,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 
-			parseDemo(*demo, *verbose, result)
+			parseDemo(*demo, *verbose, *debugPlayer, result)
 		}()
 
 	} else {
@@ -153,11 +161,11 @@ func main() {
 			if !info.IsDir() && filepath.Ext(info.Name()) == ".dem" {
 				fmt.Println("Parsing demo file:", path)
 				wg.Add(1)
-				semaphore <- struct{}{} // Acquire semaphore
 				go func(path string, verbose bool) {
 					defer wg.Done()
 					defer func() { <-semaphore }() // Release the semaphore
-					parseDemo(path, verbose, result)
+					semaphore <- struct{}{}        // Acquire semaphore
+					parseDemo(path, verbose, *debugPlayer, result)
 				}(path, *verbose)
 			}
 
@@ -180,7 +188,7 @@ func main() {
 	fmt.Println("Parsing done.")
 }
 
-func parseDemo(path string, verbose bool, result chan<- Result) {
+func parseDemo(path string, verbose bool, debugPlayer string, result chan<- Result) {
 	reported := false
 	mapPlayerEx := make(map[uint64]*MoveData)
 	outputPath := strings.TrimSuffix(path, filepath.Ext(path)) + ".csv"
@@ -212,6 +220,36 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 	p := demoinfocs.NewParser(f)
 	defer p.Close()
 
+	getMoveDataFromPlayer := func(player *common.Player) *MoveData {
+		if player == nil || player.SteamID64 == 0 {
+			return nil
+		}
+		if mapPlayerEx[player.SteamID64] == nil {
+			mapPlayerEx[player.SteamID64] = &MoveData{pl: player, Tracking: true}
+		}
+		if shouldDumpPlayer(debugPlayer, player) {
+			mapPlayerEx[player.SteamID64].DebugKeepAllSubtickEvents = true
+		}
+		return mapPlayerEx[player.SteamID64]
+	}
+
+	getMoveDataFromPlayerSlot := func(playerSlot int32) *MoveData {
+		if playerSlot < 0 {
+			return nil
+		}
+		for _, player := range p.GameState().Participants().All() {
+			if player == nil || player.SteamID64 == 0 {
+				continue
+			}
+			if int32(player.EntityID-1) == playerSlot {
+				return getMoveDataFromPlayer(player)
+			}
+		}
+		return nil
+	}
+
+	registerSubtickUserCmdHandler(p, getMoveDataFromPlayerSlot)
+
 	// Do not use this at the end of the game.
 	getOverlapDataFromPawnEntity := func(pawnEntity st.Entity) *MoveData {
 		controllerProp, hasProp := pawnEntity.PropertyValue("m_hController")
@@ -226,10 +264,7 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 		if player.SteamID64 == 0 {
 			return nil
 		}
-		if mapPlayerEx[player.SteamID64] == nil {
-			mapPlayerEx[player.SteamID64] = &MoveData{pl: player, Tracking: true}
-		}
-		return mapPlayerEx[player.SteamID64]
+		return getMoveDataFromPlayer(player)
 	}
 	p.RegisterEventHandler(func(events.FrameDone) {
 		for _, pl := range p.GameState().Participants().All() {
@@ -284,16 +319,16 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 						return
 					}
 					// Pressing any key?
-					if val.S2UInt64()&0x618 != 0 && mv.OldButtons == 0 {
+					if val.UInt64()&0x618 != 0 && mv.OldButtons == 0 {
 						mv.LastMoveAttemptTick = p.GameState().IngameTick()
 						//fmt.Printf("Player %s started moving @%d\n", ol.pl.Name, ol.LastMoveAttemptTick)
-					} else if val.S2UInt64()&0x618 == 0 && mv.OldButtons != 0 {
+					} else if val.UInt64()&0x618 == 0 && mv.OldButtons != 0 {
 						mv.NumMoveTicks += p.GameState().IngameTick() - mv.LastMoveAttemptTick
 						//fmt.Printf("Player %s stopped moving @%d (+%d)\n", ol.pl.Name, p.GameState().IngameTick(), p.GameState().IngameTick()-ol.LastMoveAttemptTick)
 					}
 
 					// Overlapping?
-					if (val.S2UInt64()&0x10 != 0) && (val.S2UInt64()&0x8 != 0) {
+					if (val.UInt64()&0x10 != 0) && (val.UInt64()&0x8 != 0) {
 						mv.IsWSOverlapping = true
 						mv.LastWSOverlapTick = p.GameState().IngameTick()
 						// fmt.Printf("%s W/S overlapped at tick %d\n",
@@ -309,7 +344,7 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 						}
 					}
 
-					if (val.S2UInt64()&0x200 != 0) && (val.S2UInt64()&0x400 != 0) {
+					if (val.UInt64()&0x200 != 0) && (val.UInt64()&0x400 != 0) {
 						mv.IsADOverlapping = true
 						mv.LastADOverlapTick = p.GameState().IngameTick()
 						// fmt.Printf("%s A/D overlapped at tick %d\n",
@@ -324,11 +359,11 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 							mv.GoodGroundSwitchCount++
 						}
 					}
-					if mv.checkGoodSwitch(val.S2UInt64()) {
+					if mv.checkGoodSwitch(val.UInt64()) {
 						mv.GoodGroundSwitchCount++
 					}
 					// Doesn't really need other buttons.
-					mv.OldButtons = val.S2UInt64() & 0x618
+					mv.OldButtons = val.UInt64() & 0x618
 				}
 				buttonProp.OnUpdate(buttonChanged)
 			}
@@ -341,7 +376,7 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 		if verbose {
 			fmt.Printf("Game duration: %d ticks (%f minutes)\n", p.GameState().IngameTick(), float64(p.GameState().IngameTick())/64.0/60.0)
 		}
-		output.WriteString("Date,SteamID64,Name,A/D overlap (instances),A/D overlap (ticks),A/D overlap (tick/instance),W/S overlap (instances),W/S overlap (ticks),W/S overlap (tick/instance),Good Strafe Switch,Total Move Ticks,Good Airstrafe Turns,Total Airtime\n")
+		output.WriteString("Date,SteamID64,Name,A/D overlap (instances),A/D overlap (ticks),A/D overlap (tick/instance),W/S overlap (instances),W/S overlap (ticks),W/S overlap (tick/instance),Good Strafe Switch,Total Move Ticks,Good Airstrafe Turns,Total Airtime,Subtick Data,Subtick Decode Errors,Null FB Detected,Null FB Streak,Null FB Required,Null FB Perfect,Null FB Overlaps,Null FB Underlap Count,Null FB Underlap Min (ms),Null FB Underlap Max (ms),Null FB Underlap Mean (ms),Null FB Underlap Median (ms),Null FB Underlap P90 (ms),Null FB Status,Null LR Detected,Null LR Streak,Null LR Required,Null LR Perfect,Null LR Overlaps,Null LR Underlap Count,Null LR Underlap Min (ms),Null LR Underlap Max (ms),Null LR Underlap Mean (ms),Null LR Underlap Median (ms),Null LR Underlap P90 (ms),Null LR Status\n")
 		for _, pl := range p.GameState().Participants().All() {
 			mv := mapPlayerEx[pl.SteamID64]
 			if mv == nil {
@@ -395,7 +430,10 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 				ADavg = float32(mv.GetADTotalOverlap()) / float32(len(mv.ADOverlapTicks))
 			}
 
-			line := fmt.Sprintf("%s,%d,%s,%d,%d,%f,%d,%d,%f,%d,%d,%d,%d\n",
+			fbNullMetrics := AnalyzeNullsForAxis(mv.RecentForwardBackwardEvents, IN_FORWARD, IN_BACK)
+			lrNullMetrics := AnalyzeNullsForAxis(mv.RecentLeftRightEvents, IN_MOVELEFT, IN_MOVERIGHT)
+
+			line := fmt.Sprintf("%s,%d,%s,%d,%d,%f,%d,%d,%f,%d,%d,%d,%d,%t,%d,%t,%.2f,%.2f,%.2f,%.2f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%s,%t,%.2f,%.2f,%.2f,%.2f,%d,%.2f,%.2f,%.2f,%.2f,%.2f,%s\n",
 				stat.ModTime().Format(time.DateTime),
 				mv.pl.SteamID64,
 				mv.pl.Name,
@@ -408,8 +446,67 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 				mv.GoodGroundSwitchCount,
 				mv.NumMoveTicks,
 				mv.GoodTurns,
-				mv.AirTime)
+				mv.AirTime,
+				mv.HasSubtickData,
+				mv.SubtickDecodeErrors,
+				fbNullMetrics.Detected,
+				fbNullMetrics.ConsecutivePerfect,
+				fbNullMetrics.RequiredPerfect,
+				fbNullMetrics.Perfect,
+				fbNullMetrics.Overlaps,
+				fbNullMetrics.UnderlapCount,
+				fbNullMetrics.UnderlapMinMs,
+				fbNullMetrics.UnderlapMaxMs,
+				fbNullMetrics.UnderlapMeanMs,
+				fbNullMetrics.UnderlapMedianMs,
+				fbNullMetrics.UnderlapP90Ms,
+				fbNullMetrics.Status,
+				lrNullMetrics.Detected,
+				lrNullMetrics.ConsecutivePerfect,
+				lrNullMetrics.RequiredPerfect,
+				lrNullMetrics.Perfect,
+				lrNullMetrics.Overlaps,
+				lrNullMetrics.UnderlapCount,
+				lrNullMetrics.UnderlapMinMs,
+				lrNullMetrics.UnderlapMaxMs,
+				lrNullMetrics.UnderlapMeanMs,
+				lrNullMetrics.UnderlapMedianMs,
+				lrNullMetrics.UnderlapP90Ms,
+				lrNullMetrics.Status)
 			output.WriteString(line)
+
+			if shouldDumpPlayer(debugPlayer, mv.pl) {
+				fbDebugMetrics, fbUnderlaps := AnalyzeNullsForAxisWithDetails(mv.RecentForwardBackwardEvents, IN_FORWARD, IN_BACK)
+				lrDebugMetrics, lrUnderlaps := AnalyzeNullsForAxisWithDetails(mv.RecentLeftRightEvents, IN_MOVELEFT, IN_MOVERIGHT)
+
+				fmt.Printf("Subtick underlap stats for %s (%d):\n", mv.pl.Name, mv.pl.SteamID64)
+				dumpUnderlapStats("FB", fbDebugMetrics, fbUnderlaps)
+				dumpUnderlapStats("LR", lrDebugMetrics, lrUnderlaps)
+
+				allEvents := make([]InputEvent, 0, len(mv.RecentForwardBackwardEvents)+len(mv.RecentLeftRightEvents))
+				allEvents = append(allEvents, mv.RecentForwardBackwardEvents...)
+				allEvents = append(allEvents, mv.RecentLeftRightEvents...)
+				sort.Slice(allEvents, func(i, j int) bool {
+					if allEvents[i].CmdNum != allEvents[j].CmdNum {
+						return allEvents[i].CmdNum < allEvents[j].CmdNum
+					}
+					if allEvents[i].Fraction != allEvents[j].Fraction {
+						return allEvents[i].Fraction < allEvents[j].Fraction
+					}
+					if allEvents[i].Button != allEvents[j].Button {
+						return allEvents[i].Button < allEvents[j].Button
+					}
+					if allEvents[i].Pressed != allEvents[j].Pressed {
+						return allEvents[i].Pressed && !allEvents[j].Pressed
+					}
+					return allEvents[i].Analog && !allEvents[j].Analog
+				})
+
+				fmt.Printf("Subtick all movement events for %s (%d): %d events\n", mv.pl.Name, mv.pl.SteamID64, len(allEvents))
+				for _, ev := range allEvents {
+					fmt.Printf("  cmd=%d frac=%.6f button=%s pressed=%t analog=%t\n", ev.CmdNum, ev.Fraction, buttonName(ev.Button), ev.Pressed, ev.Analog)
+				}
+			}
 		}
 		reported = true
 	}
@@ -419,6 +516,7 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 	// Parse to end
 	err = p.ParseToEnd()
 	spewReport()
+	fmt.Println("Parsing done for", path)
 	checkError(err)
 
 }
@@ -426,5 +524,59 @@ func parseDemo(path string, verbose bool, result chan<- Result) {
 func checkError(err error) {
 	if err != nil {
 		panic(err)
+	}
+}
+
+func shouldDumpPlayer(debugPlayer string, player *common.Player) bool {
+	if debugPlayer == "" || player == nil {
+		return false
+	}
+	if player.Name == debugPlayer {
+		return true
+	}
+	return fmt.Sprintf("%d", player.SteamID64) == debugPlayer
+}
+
+func buttonName(button uint64) string {
+	switch button {
+	case IN_FORWARD:
+		return "IN_FORWARD"
+	case IN_BACK:
+		return "IN_BACK"
+	case IN_MOVELEFT:
+		return "IN_MOVELEFT"
+	case IN_MOVERIGHT:
+		return "IN_MOVERIGHT"
+	default:
+		return fmt.Sprintf("0x%x", button)
+	}
+}
+
+func dumpUnderlapStats(axis string, metrics NullAxisMetrics, underlaps []float64) {
+	if len(underlaps) == 0 {
+		fmt.Printf("  %s underlaps: none (status=%s, samples=%d)\n", axis, metrics.Status, metrics.Samples)
+		return
+	}
+
+	underlapMs := make([]float64, len(underlaps))
+	for i, d := range underlaps {
+		underlapMs[i] = d * 1000.0
+	}
+	sort.Float64s(underlapMs)
+
+	sum := 0.0
+	for _, v := range underlapMs {
+		sum += v
+	}
+	mean := sum / float64(len(underlapMs))
+	min := underlapMs[0]
+	max := underlapMs[len(underlapMs)-1]
+	median := underlapMs[len(underlapMs)/2]
+	p90 := underlapMs[int(float64(len(underlapMs)-1)*0.9)]
+
+	fmt.Printf("  %s underlaps: count=%d min=%.3fms max=%.3fms mean=%.3fms median=%.3fms p90=%.3fms\n", axis, len(underlapMs), min, max, mean, median, p90)
+	fmt.Printf("  %s underlap times (ms):\n", axis)
+	for _, v := range underlapMs {
+		fmt.Printf("    %.6f\n", v)
 	}
 }
